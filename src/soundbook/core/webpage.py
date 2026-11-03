@@ -17,7 +17,7 @@ from pathlib import Path
 
 from soundbook.core.document import Book, Chapter, clean_text
 
-MAX_BYTES = 5 * 1024 * 1024
+MAX_BYTES = 10 * 1024 * 1024
 TIMEOUT = 20.0
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -123,7 +123,9 @@ def fetch_page(url: str, timeout: float = TIMEOUT) -> tuple[str, str]:
         raise ValueError(f"could not reach the site: {exc.reason}") from exc
 
     if len(raw) > MAX_BYTES:
-        raise ValueError("page is too large to import")
+        raise ValueError(
+            f"page is larger than {MAX_BYTES // (1024 * 1024)} MB"
+        )
 
     try:
         text = raw.decode(charset, errors="replace")

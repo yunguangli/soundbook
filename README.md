@@ -59,7 +59,7 @@ old page numbers no longer match the new text.
 
 HTML import strips scripts, navigation, headers, footers, sidebars and forms,
 then keeps the densest article container. Web links use the same extractor:
-the app downloads the page (5 MB limit, HTML only) and follows redirects.
+the app downloads the page (10 MB limit, HTML only) and follows redirects.
 `<h2>` headings become chapters; pages that render their text only with
 JavaScript, or that sit behind a login/paywall, cannot be imported.
 
