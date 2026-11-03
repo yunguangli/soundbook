@@ -14,7 +14,7 @@ import flet as ft
 from flet_audio import Audio, AudioState, ReleaseMode
 
 from soundbook import config
-from soundbook.core.audio import PageAudio, PageCache, assemble
+from soundbook.core.audio import PageAudio, PageCache, assemble, combine_prefix
 from soundbook.core.chunker import paginate, split_sentences
 from soundbook.core.document import Chapter, parse_book
 from soundbook.core.store import Store
@@ -80,6 +80,10 @@ class SoundbookApp:
             log(f"page layout changed; cleared {freed / 1_000_000:.1f} MB cache")
         self.voice = self.store.get_setting("voice", "af_heart")
         self.speed = float(self.store.get_setting("speed", "1.0"))
+        self._voice_choices: list[str] | None = None
+        self._switching_voice = False
+        self._voice_switch_token: object | None = None
+        self._voice_switch_resume = False
 
         self.tts = None
         self._tts_language: str | None = None
@@ -961,6 +965,7 @@ class SoundbookApp:
             color=ft.Colors.ON_SURFACE_VARIANT,
         )
 
+        self.voice_text = ft.Text(self.voice, size=11)
         player = ft.Container(
             padding=ft.Padding.symmetric(horizontal=12, vertical=6),
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
@@ -983,7 +988,21 @@ class SoundbookApp:
                                     self.next_page
                                 ),
                             ),
-                            ft.Text(self.voice, size=11),
+                            ft.PopupMenuButton(
+                                content=ft.Row(
+                                    [
+                                        ft.Icon(
+                                            ft.Icons.RECORD_VOICE_OVER,
+                                            size=13,
+                                        ),
+                                        self.voice_text,
+                                    ],
+                                    spacing=3,
+                                    tight=True,
+                                ),
+                                tooltip="Change voice",
+                                items=self._voice_menu_items(),
+                            ),
                             ft.Text(f"{self.speed:.2f}x", size=11),
                         ],
                         alignment=ft.MainAxisAlignment.CENTER,
@@ -1070,6 +1089,15 @@ class SoundbookApp:
             f"toggle_play state={self._state} busy={self._busy} "
             f"cached={self.page_audio is not None}"
         )
+        if self._switching_voice:
+            if self._state == AudioState.PLAYING and self.audio is not None:
+                try:
+                    await asyncio.wait_for(self.audio.pause(), timeout=1.0)
+                except Exception:
+                    pass
+                self._voice_switch_resume = False
+            self._snack("Switching voice…")
+            return
         if self._state == AudioState.PLAYING:
             await self.audio.pause()
             return
@@ -1704,6 +1732,11 @@ class SoundbookApp:
             self._safe_update()
 
         if e.state == AudioState.COMPLETED and self._view == "reader":
+            if self._switching_voice:
+                # Keep the last page open; the voice switch will resume from
+                # the current sentence as soon as its new audio is ready.
+                log("page complete while switching voice")
+                return
             log("page complete; advancing")
             self._advance_after_completion()
 
@@ -1880,11 +1913,191 @@ class SoundbookApp:
         self._safe_update()
 
     def _voice_selected(self, e) -> None:
-        self.voice = e.control.value
-        self.store.set_setting("voice", self.voice)
-        self.tts = None
-        self.page_audio = None
-        self._snack("Voice saved. New pages will use it.")
+        self._run_task(self._apply_voice, e.control.value)
+
+    def _voice_list(self) -> list[str]:
+        if self._voice_choices is None:
+            try:
+                self._voice_choices = [
+                    voice
+                    for voice in list_voices(config.voices_path())
+                    if voice[0] in SPEAKABLE
+                ]
+            except Exception:
+                self._voice_choices = [self.voice]
+        return self._voice_choices
+
+    def _voice_menu_items(self) -> list[ft.PopupMenuItem]:
+        return [
+            ft.PopupMenuItem(
+                content=ft.Text(
+                    f"{voice}  ✓" if voice == self.voice else voice,
+                    size=12,
+                ),
+                on_click=lambda e, v=voice: self._run_task(
+                    self._apply_voice, v
+                ),
+            )
+            for voice in self._voice_list()
+        ]
+
+    async def _apply_voice(self, voice: str) -> None:
+        """Switch voice without silencing the page while it re-renders."""
+        if self._closing or not voice or voice == self.voice:
+            return
+
+        was_playing = self._state == AudioState.PLAYING
+        self.voice = voice
+        self.store.set_setting("voice", voice)
+
+        # The model is reused when both voices speak the same language.
+        language = "en-gb" if voice.startswith("b") else "en-us"
+        if self._tts_language is not None and self._tts_language != language:
+            self.tts = None
+            self._tts_language = None
+        elif self.tts is not None and self._tts_language is None:
+            self.tts = None
+
+        self._audio_key = None
+        log(f"voice changed to {voice}")
+        if getattr(self, "voice_text", None) is not None:
+            self.voice_text.value = voice
+            self._safe_update()
+
+        for task in list(self._prefetch_tasks.values()):
+            task.cancel()
+        self._prefetch_tasks.clear()
+
+        if self.book is not None:
+            if was_playing:
+                # Keep the old voice playing; swap at the current sentence
+                # when the new voice's page is ready.
+                self._voice_switch_resume = True
+                self._start_voice_switch(voice)
+            elif self._view == "reader":
+                self.load_page(self.chapter_idx, self.page_idx, self._active)
+                self._wants_play = False
+            else:
+                self.page_audio = None
+                self._new_page = True
+                self._run_task(self._prepare_page)
+
+        self._snack(
+            f"Switching to {voice}…" if was_playing else f"Voice: {voice}"
+        )
+
+    def _start_voice_switch(self, voice: str) -> None:
+        token = object()
+        self._voice_switch_token = token
+        self._switching_voice = True
+        self._run_task(self._switch_voice, voice, token)
+
+    async def _switch_voice(self, voice: str, token) -> None:
+        if self.book is None:
+            return
+        book_id = self.book["id"]
+        chapter_idx = self.chapter_idx
+        page_idx = self.page_idx
+        speed = self.speed
+        sentences = (
+            self.pages[page_idx] if page_idx < len(self.pages) else []
+        )
+        if not sentences:
+            if self._voice_switch_token is token:
+                self._switching_voice = False
+            return
+
+        self._busy = True
+        self._set_synthesizing(True)
+        self.status.value = "Switching voice…"
+        self._safe_update()
+
+        def still_wanted() -> bool:
+            return (
+                not self._closing
+                and self.book is not None
+                and self.book["id"] == book_id
+                and self.chapter_idx == chapter_idx
+                and self.page_idx == page_idx
+                and self.voice == voice
+                and self.speed == speed
+                and self._voice_switch_token is token
+                and self._view in {"reader", "settings"}
+            )
+
+        def progress(index: int, total: int) -> None:
+            if self._voice_switch_token is token:
+                self.status.value = f"Switching voice {index}/{total}…"
+                self._safe_update()
+
+        try:
+            old_audio = self.page_audio
+            start_index = max(0, min(self._active, len(sentences) - 1))
+            full = self.cache.load(
+                book_id, chapter_idx, page_idx, voice, speed
+            )
+
+            if full is not None:
+                log("voice switch: page already cached")
+                audio = full
+            else:
+                remaining = sentences[start_index:]
+                new_audio = await self._render_sentences(
+                    remaining,
+                    voice=voice,
+                    speed=speed,
+                    keep_going=still_wanted,
+                    on_progress=progress,
+                )
+                if new_audio is None or not still_wanted():
+                    return
+
+                if start_index == 0 or old_audio is None:
+                    audio = new_audio
+                    if start_index == 0:
+                        self.cache.save(
+                            book_id,
+                            chapter_idx,
+                            page_idx,
+                            voice,
+                            speed,
+                            new_audio,
+                        )
+                else:
+                    now = max(
+                        start_index,
+                        min(self._active, len(sentences) - 1),
+                    )
+                    offset = now - start_index
+                    audio = combine_prefix(old_audio, now, new_audio, offset)
+                    log(f"voice switch spliced at sentence {now}")
+
+            if self._voice_switch_token is token:
+                self._switching_voice = False
+                self._busy = False
+                self._set_synthesizing(False)
+            should_play = self._voice_switch_resume or self._state in (
+                AudioState.PLAYING,
+                AudioState.COMPLETED,
+            )
+            self._voice_switch_resume = False
+            self.page_audio = audio
+            self._audio_key = None
+            self._new_page = True
+            self._wants_play = False
+            if should_play:
+                await self._play_page(self._active)
+            else:
+                self._update_player()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            if self._voice_switch_token is token:
+                self._switching_voice = False
+                self._voice_switch_resume = False
+                self._busy = False
+                self._set_synthesizing(False)
+                self._update_player()
 
     def _speed_selected(self, e) -> None:
         self.speed = float(e.control.value)

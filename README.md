@@ -8,6 +8,7 @@ Offline reader with Kokoro-82M text-to-speech, built with Python + Flet.
 - **Web link** import: fetch a URL, keep the main article, skip page chrome
 - **Type** tab for transcribing a pasted paragraph immediately
 - Sentence highlighting, page-level audio, disk cache, voice + speed settings
+- Change voice while playing; the current page re-renders in the background and switches at the current sentence
 
 ## Requirements
 

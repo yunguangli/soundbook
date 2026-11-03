@@ -1,6 +1,12 @@
 import numpy as np
 
-from soundbook.core.audio import PageCache, SentenceTiming, assemble, wav_bytes
+from soundbook.core.audio import (
+    PageCache,
+    SentenceTiming,
+    assemble,
+    combine_prefix,
+    wav_bytes,
+)
 from soundbook.core.tts.vocab import SAMPLE_RATE
 
 
@@ -29,6 +35,31 @@ def test_wav_bytes_header():
     data = wav_bytes(np.zeros(100, dtype=np.float32))
     assert data[:4] == b"RIFF"
     assert data[8:12] == b"WAVE"
+
+
+def test_combine_prefix_keeps_sentence_timings():
+    one_second = np.ones(SAMPLE_RATE, dtype=np.float32)
+    old = assemble(
+        [one_second, one_second, one_second],
+        ["a", "b", "c"],
+        silence_s=0.1,
+    )
+    new = assemble(
+        [one_second * 0.5, one_second * 0.5],
+        ["b", "c"],
+        silence_s=0.1,
+    )
+
+    mixed = combine_prefix(old, 1, new, 0)
+
+    assert [timing.text for timing in mixed.timings] == ["a", "b", "c"]
+    assert mixed.timings[0].start == 0.0
+    assert abs(mixed.timings[1].start - old.timings[1].start) < 1e-6
+    assert abs(mixed.duration - (old.timings[1].start + new.duration)) < 1e-6
+
+    later = combine_prefix(old, 2, new, 1)
+    assert [timing.text for timing in later.timings] == ["a", "b", "c"]
+    assert abs(later.timings[2].start - old.timings[2].start) < 1e-6
 
 
 def test_cache_roundtrip(tmp_path):

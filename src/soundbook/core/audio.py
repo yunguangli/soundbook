@@ -52,6 +52,70 @@ def wav_bytes(samples: np.ndarray) -> bytes:
     return buffer.getvalue()
 
 
+def wav_samples(data: bytes) -> np.ndarray:
+    """Decode a mono 16-bit PCM WAV back to float32 samples."""
+    with wave.open(io.BytesIO(data), "rb") as wav:
+        frames = wav.readframes(wav.getnframes())
+    return np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+
+
+def combine_prefix(
+    old: PageAudio,
+    old_until: int,
+    new: PageAudio,
+    new_from: int = 0,
+) -> PageAudio:
+    """Keep the old audio up to a sentence, then continue with new audio.
+
+    Used when the voice changes mid-page: the already-heard sentences keep the
+    old voice, while the current and later sentences use the new voice. The
+    returned timing list still covers every sentence in the page.
+    """
+    old_until = max(0, min(old_until, len(old.timings)))
+    new_from = (
+        max(0, min(new_from, len(new.timings) - 1)) if new.timings else 0
+    )
+
+    old_samples = wav_samples(old.wav)
+    if old_until < len(old.timings):
+        split = int(old.timings[old_until].start * SAMPLE_RATE)
+    else:
+        split = len(old_samples)
+    prefix = old_samples[: max(0, split)]
+
+    new_samples = wav_samples(new.wav)
+    if new.timings and new_from < len(new.timings):
+        new_split = new.timings[new_from].start
+        start = int(new_split * SAMPLE_RATE)
+    else:
+        new_split = 0.0
+        start = len(new_samples)
+    tail = new_samples[max(0, start) :]
+
+    combined = np.concatenate([prefix, tail]) if len(prefix) else tail
+    if len(combined) == 0:
+        combined = np.zeros(0, dtype=np.float32)
+
+    # Put the first kept new sentence exactly at the end of the old prefix;
+    # any silence before it in the new rendering is trimmed away.
+    shift = len(prefix) / SAMPLE_RATE - new_split
+    timings = list(old.timings[:old_until])
+    timings.extend(
+        SentenceTiming(
+            text=timing.text,
+            start=timing.start + shift,
+            end=timing.end + shift,
+        )
+        for timing in new.timings[new_from:]
+    )
+
+    return PageAudio(
+        wav=wav_bytes(combined),
+        duration=len(combined) / SAMPLE_RATE,
+        timings=timings,
+    )
+
+
 def assemble(
     parts: list[np.ndarray],
     sentences: list[str],
