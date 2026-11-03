@@ -1,0 +1,1 @@
+"""Soundbook — reader with on-device Kokoro TTS."""

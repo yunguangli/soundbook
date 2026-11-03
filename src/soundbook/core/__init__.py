@@ -1,0 +1,1 @@
+"""Core domain logic: documents, audio assembly, storage, TTS."""

@@ -1,0 +1,81 @@
+[project]
+name = "soundbook"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [
+    { name = "Flet developer", email = "you@example.com" }
+]
+dependencies = [
+    "flet>=1.0.5",
+    "flet-audio>=1.0.5",
+    "numpy",
+    "ebooklib",
+    "beautifulsoup4",
+    "pypdf",
+]
+
+[dependency-groups]
+dev = [
+    "flet-cli>=1.0.5",
+    "flet-desktop>=1.0.5",
+    "flet-web>=1.0.5",
+    # Integration testing with `flet test` / pytest. The `test` extra brings in
+    # pytest, pytest-asyncio and the screenshot-comparison dependencies.
+    "flet[test]>=1.0.5",
+    # onnxruntime is a per-platform app dependency; installed here so the
+    # backend tests and scripts/synth.py run on the dev machine.
+    "onnxruntime>=1.27.0",
+    # Native PDF parser for dev machines and desktop builds.
+    "pymupdf>=1.27",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.flet]
+desktop_flavor = "full"     # required for flet-audio
+org = "com.mycompany"
+product = "soundbook"
+company = "Flet"
+copyright = "Copyright (C) 2023-2026 by Flet"
+
+# src/assets/icon.png is the icon for every platform. Keep it transparent and
+# filling the whole canvas: web, Windows and Linux show it as-is, and Flet
+# shrinks it to the margin iOS, macOS and Android each mask away. This colour
+# is what sits behind it where transparency cannot survive - the iOS icon, the
+# macOS tile and the Android background layer. Defaults to white.
+# icon_background = "#ffffff"
+
+[tool.flet.app]
+path = "src"
+
+# Native dependencies: never in [project].dependencies, because the web build
+# resolves that list against Pyodide, where neither wheel exists.
+[tool.flet.android.dependencies]
+onnxruntime = ">=1.27.0"
+pymupdf = ">=1.27"
+
+[tool.flet.linux.dependencies]
+onnxruntime = ">=1.27.0"
+pymupdf = ">=1.27"
+
+[tool.flet.windows.dependencies]
+onnxruntime = ">=1.27.0"
+pymupdf = ">=1.27"
+
+[tool.flet.android]
+split_per_abi = true
+
+[tool.flet.android.permission]
+"android.permission.WAKE_LOCK" = true
+"android.permission.FOREGROUND_SERVICE" = true
+"android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" = true
+"android.permission.POST_NOTIFICATIONS" = true
+
+# The web build is server-backed; do not ship 129 MB of TTS assets.
+[tool.flet.web.app]
+exclude = ["assets/kokoro", "assets/g2p"]
