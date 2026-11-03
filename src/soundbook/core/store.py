@@ -11,7 +11,12 @@ from soundbook.core.chunker import count_pages
 from soundbook.core.document import Book, Chapter
 
 # Bump when the schema below changes; `Store._migrate` upgrades older files.
-SCHEMA_VERSION = 2
+# 3: pages grew from 360 to 720 chars, so page counts must be recomputed.
+SCHEMA_VERSION = 3
+
+# Page size used by schema versions 1 and 2, needed to preserve the reading
+# percentage when older databases are repaginated.
+LEGACY_PAGE_CHARS = 360
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS books (
@@ -59,6 +64,7 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self.layout_changed = False
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         with self._lock:
@@ -78,10 +84,14 @@ class Store:
         return {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
 
     def _migrate(self) -> None:
-        """Upgrade databases created before `SCHEMA_VERSION` 2."""
+        """Upgrade databases created before `SCHEMA_VERSION`."""
         version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
         if version >= SCHEMA_VERSION:
             return
+
+        # Page audio is keyed by page number, so changing the page size makes
+        # every cached file wrong. The app clears the cache once.
+        self.layout_changed = version < 3
 
         if "page_count" not in self._columns("chapters"):
             self._db.execute(
@@ -92,28 +102,84 @@ class Store:
                 "ALTER TABLE progress ADD COLUMN fraction REAL NOT NULL DEFAULT 0"
             )
 
-        for row in self._db.execute(
-            "SELECT id, text FROM chapters WHERE page_count <= 0"
-        ).fetchall():
-            self._db.execute(
-                "UPDATE chapters SET page_count = ? WHERE id = ?",
-                (count_pages(row["text"]), row["id"]),
-            )
-
-        for row in self._db.execute(
-            "SELECT book_id, chapter_idx, page_idx FROM progress"
-        ).fetchall():
-            self._db.execute(
-                "UPDATE progress SET fraction = ? WHERE book_id = ?",
-                (
-                    self._fraction(
-                        row["book_id"], row["chapter_idx"], row["page_idx"], 0.0
-                    ),
-                    row["book_id"],
-                ),
-            )
+        if version < 3:
+            self._migrate_page_layout(version)
 
         self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    def _migrate_page_layout(self, version: int) -> None:
+        """Repaginate chapters and keep each reader near the same percentage."""
+        chapters = self._db.execute(
+            "SELECT book_id, idx, text, page_count FROM chapters "
+            "ORDER BY book_id, idx"
+        ).fetchall()
+
+        old_counts: dict[int, list[int]] = {}
+        new_counts: dict[int, list[int]] = {}
+        for row in chapters:
+            if version >= 2 and int(row["page_count"]) > 0:
+                old_count = int(row["page_count"])
+            else:
+                old_count = count_pages(row["text"], LEGACY_PAGE_CHARS)
+            new_count = count_pages(row["text"])
+
+            old_counts.setdefault(row["book_id"], []).append(old_count)
+            new_counts.setdefault(row["book_id"], []).append(new_count)
+            self._db.execute(
+                "UPDATE chapters SET page_count = ? "
+                "WHERE book_id = ? AND idx = ?",
+                (new_count, row["book_id"], row["idx"]),
+            )
+
+        for row in self._db.execute(
+            "SELECT book_id, chapter_idx, page_idx, fraction FROM progress"
+        ).fetchall():
+            book_id = int(row["book_id"])
+            old = old_counts.get(book_id) or []
+            new = new_counts.get(book_id) or []
+            if not old or not new:
+                continue
+
+            if version >= 2:
+                fraction = float(row["fraction"])
+            else:
+                chapter_idx = max(
+                    0, min(int(row["chapter_idx"]), len(old) - 1)
+                )
+                page_idx = max(
+                    0, min(int(row["page_idx"]), old[chapter_idx] - 1)
+                )
+                total = sum(old)
+                fraction = (
+                    (sum(old[:chapter_idx]) + page_idx) / total if total else 0.0
+                )
+            fraction = max(0.0, min(1.0, fraction))
+
+            total = sum(new)
+            if not total:
+                chapter_idx = page_idx = 0
+                new_fraction = 0.0
+            else:
+                target = fraction * total
+                offset = 0
+                chapter_idx = len(new) - 1
+                page_idx = 0
+                for index, count in enumerate(new):
+                    if index == len(new) - 1 or target < offset + count:
+                        chapter_idx = index
+                        page_idx = max(
+                            0,
+                            min(count - 1, int(target - offset + 0.5)),
+                        )
+                        break
+                    offset += count
+                new_fraction = (offset + page_idx) / total
+
+            self._db.execute(
+                "UPDATE progress SET chapter_idx = ?, page_idx = ?, "
+                "sentence_idx = 0, fraction = ? WHERE book_id = ?",
+                (chapter_idx, page_idx, new_fraction, book_id),
+            )
 
     def _fraction(
         self,

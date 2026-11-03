@@ -73,6 +73,11 @@ class SoundbookApp:
 
         self.store = Store(config.db_path())
         self.cache = PageCache(config.cache_dir())
+        if self.store.layout_changed:
+            # Page size changed, so every cached page number points at the
+            # wrong text. Old audio must not be played.
+            freed = self.cache.clear()
+            log(f"page layout changed; cleared {freed / 1_000_000:.1f} MB cache")
         self.voice = self.store.get_setting("voice", "af_heart")
         self.speed = float(self.store.get_setting("speed", "1.0"))
 

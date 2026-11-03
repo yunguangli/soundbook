@@ -12,7 +12,10 @@ ABBREVIATIONS = {
     "e.g", "i.e", "no", "fig", "vol", "ch", "p", "pp",
 }
 
-DEFAULT_PAGE_CHARS = 360
+# Larger pages give the synthesizer 3-4 sentences to render in parallel,
+# which is what keeps playback seamless on CPU-only machines. 360-char pages
+# often held one long sentence and could not use the spare threads.
+DEFAULT_PAGE_CHARS = 720
 
 
 def _paragraphs(text: str):

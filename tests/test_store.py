@@ -158,4 +158,48 @@ def test_migrates_v1_database(tmp_path):
     assert row["page_count"] == count_pages(LONG_TEXT)
     assert row["page_count"] > 1
     assert abs(row["fraction"] - 1 / row["page_count"]) < 1e-9
+    assert store.layout_changed is True
+    store.close()
+
+
+V2_SCHEMA = V1_SCHEMA.replace(
+    "    text TEXT NOT NULL,\n",
+    "    text TEXT NOT NULL,\n    page_count INTEGER NOT NULL DEFAULT 0,\n",
+).replace(
+    "    sentence_idx INTEGER NOT NULL DEFAULT 0,\n",
+    "    sentence_idx INTEGER NOT NULL DEFAULT 0,\n"
+    "    fraction REAL NOT NULL DEFAULT 0,\n",
+)
+
+
+def test_migrates_v2_to_larger_pages(tmp_path):
+    path = tmp_path / "v2.sqlite3"
+    db = sqlite3.connect(path)
+    db.executescript(V2_SCHEMA)
+    db.execute("PRAGMA user_version = 2")
+    db.execute(
+        "INSERT INTO books (id, title, author, source, created_at) "
+        "VALUES (1, 'Old', '', '/tmp/old.txt', 0)"
+    )
+    db.execute(
+        "INSERT INTO chapters "
+        "(book_id, idx, title, text, page_count) VALUES (1, 0, 'One', ?, 999)",
+        (LONG_TEXT,),
+    )
+    db.execute(
+        "INSERT INTO progress "
+        "(book_id, chapter_idx, page_idx, sentence_idx, fraction, updated_at) "
+        "VALUES (1, 0, 0, 0, 0.5, 0)"
+    )
+    db.commit()
+    db.close()
+
+    store = Store(path)
+    row = store.list_books()[0]
+    assert store.layout_changed is True
+    assert row["page_count"] == count_pages(LONG_TEXT)
+    assert row["page_count"] < 999
+    # The position is mapped to the nearest new page, so the percentage stays
+    # close to the old 50%.
+    assert 0.5 <= row["fraction"] <= 0.65
     store.close()

@@ -49,6 +49,11 @@ While a page is playing, the next pages are synthesized in the background (up
 to four ahead), and the sentences of each page are rendered in parallel, so
 playback normally continues without waiting when the current page ends.
 
+Reader pages hold about 720 characters so a page usually contains several
+sentences for the parallel synthesizer. Upgrading from an older version
+repaginates existing books once and clears the rendered-audio cache, because
+old page numbers no longer match the new text.
+
 ## HTML files and web links
 
 HTML import strips scripts, navigation, headers, footers, sidebars and forms,
@@ -85,7 +90,7 @@ top/bottom band. Scanned PDFs without a text layer are not OCR'd.
 uv run pytest -q
 ```
 
-49 tests cover tokenization, dictionary G2P, sentence/page splitting, audio
+51 tests cover tokenization, dictionary G2P, sentence/page splitting, audio
 assembly and timing, parsing (EPUB/PDF/Markdown/HTML/TXT), PDF layout clean-up,
 web extraction, sqlite storage, cache round-trips and the progress/migration
 logic.
