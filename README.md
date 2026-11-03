@@ -91,7 +91,7 @@ top/bottom band. Scanned PDFs without a text layer are not OCR'd.
 uv run pytest -q
 ```
 
-51 tests cover tokenization, dictionary G2P, sentence/page splitting, audio
+52 tests cover tokenization, dictionary G2P, sentence/page splitting, audio
 assembly and timing, parsing (EPUB/PDF/Markdown/HTML/TXT), PDF layout clean-up,
 web extraction, sqlite storage, cache round-trips and the progress/migration
 logic.
@@ -99,12 +99,14 @@ logic.
 ## Build
 
 ```bash
-uv run flet build apk --split-per-abi
+uv run flet build apk      # arm64-v8a (see [tool.flet.android] in pyproject)
 uv run flet build linux
 uv run flet build windows
 ```
 
 The APK is ~160–175 MB per ABI because the model ships inside the app.
+`onnxruntime` has no 32-bit ARM Android wheel, so only `arm64-v8a` (and
+optionally `x86_64` for emulators) can be built.
 
 ## Known gaps
 
